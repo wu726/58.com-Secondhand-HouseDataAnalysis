@@ -1,0 +1,270 @@
+import requests
+from bs4 import BeautifulSoup
+import csv
+import time
+import random
+from tqdm import tqdm
+import re
+from fake_useragent import UserAgent
+
+# ===================== 配置项 =====================
+CONFIG = {
+    "base_url": "https://wh.58.com/jiangan/ershoufang/j1",
+    # 真实cookie请本地账号自行获取
+    "cookie": 'f=n; commontopbar_new_city_info=【脱敏城市】; aQQ_ajkguid=【脱敏随机ID】; sessid=【脱敏会话ID】; id58=【脱敏账号标识】; xxzlxxid=【脱敏置业ID】; 58home=【城市】; 58tj_uuid=【脱敏追踪ID】; fzq_h=【脱敏长期签名】; wmda_visited_projects=【脱敏浏览房源】; wmda_uuid=【脱敏设备ID】; PPU="UID=【脱敏账号UID】&UN=【脱敏用户名】"; xxzlbbid=【脱敏置业长ID】',
+    "headers": {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+        "Cache-Control": "max-age=0",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Ch-Ua": '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"'
+    },
+    "csv_file": "江岸区_毛坯_二手房数据.csv",
+    "max_items": 190,
+    "max_retry": 10,
+    "timeout": 20,
+    "min_interval": 3,
+    "max_interval": 10,
+    "scroll_simulation": True
+}
+    "csv_file": "江汉区_精装修_二手房数据.csv",  # 输出文件名  毛坯 j1  简单装修 j2  精装修 j4  豪华装修 j5
+    "max_pages": 10,  # 修改为最大爬取页数
+    "max_retry": 15,  # 每页最大重试次数
+    "timeout": 20,  # 请求超时时间（秒）
+    "min_interval": 3,  # 最小访问间隔（秒）
+    "max_interval": 10,  # 最大访问间隔（秒）
+    "scroll_simulation": True  # 是否模拟页面滚动（通过延迟模拟）
+}
+
+# 初始化UserAgent池（模拟不同浏览器）
+ua = UserAgent()
+
+# ===================== 工具函数 =====================
+def init_csv():
+    """初始化CSV文件"""
+    headers = ["小区名称", "户型", "面积(㎡)", "朝向", "楼层", "建造年份", "总价(万)", "单价(元/㎡)", "核心卖点"]
+    try:
+        with open(CONFIG["csv_file"], "w", newline="", encoding="utf-8-sig") as f:
+            csv.writer(f).writerow(headers)
+        print(f"✅ CSV初始化完成：{CONFIG['csv_file']}")
+        return True
+    except Exception as e:
+        print(f"❌ CSV初始化失败：{e}")
+        return False
+
+def get_random_headers():
+    """获取随机请求头（模拟不同用户浏览器）"""
+    headers = CONFIG["headers"].copy()
+    # 随机切换User-Agent
+    headers["User-Agent"] = ua.random
+    # 随机增加Accept-Language变化
+    lang_list = ["zh-CN,zh;q=0.9", "zh-CN,zh;q=0.9,en;q=0.8", "zh-CN,zh;q=0.8,en-US;q=0.6"]
+    headers["Accept-Language"] = random.choice(lang_list)
+    return headers
+
+def simulate_user_behavior():
+    """模拟用户浏览行为（滚动、停留）"""
+    if CONFIG["scroll_simulation"]:
+        # 模拟滚动页面的时间延迟（0.3-0.8秒）
+        scroll_delay = random.uniform(0.3, 0.8)
+        time.sleep(scroll_delay)
+        print(f"📱 模拟页面滚动，停留{scroll_delay:.2f}秒")
+
+def extract_house_info(house_div):
+    """提取单条房源信息（适配江岸区页面结构）"""
+    info = {k: "未知" for k in ["小区名称", "户型", "面积(㎡)", "朝向", "楼层", "建造年份", "总价(万)", "单价(元/㎡)", "核心卖点"]}
+    
+    # 1. 小区名称
+    comm_name = house_div.select_one(".property-content-info-comm-name")
+    if comm_name:
+        info["小区名称"] = comm_name.get_text(strip=True)
+    
+    # 2. 户型
+    house_type = house_div.select_one(".property-content-info-attribute")
+    if house_type:
+        info["户型"] = re.sub(r'\s+', '', house_type.get_text(strip=True))
+    
+    # 3. 面积
+    area_elems = house_div.select(".property-content-info-text")
+    for elem in area_elems:
+        text = elem.get_text(strip=True)
+        if "㎡" in text:
+            area_match = re.search(r'(\d+\.?\d*)', text)
+            if area_match:
+                info["面积(㎡)"] = area_match.group(1)
+                break
+    
+    # 4. 朝向
+    orientations = ["南北", "东西", "南", "北", "东", "西", "东南", "西南", "东北", "西北"]
+    for elem in area_elems:
+        text = elem.get_text(strip=True)
+        if text in orientations:
+            info["朝向"] = text
+            break
+    
+    # 5. 楼层
+    for elem in area_elems:
+        text = elem.get_text(strip=True)
+        if "层" in text and "㎡" not in text:
+            info["楼层"] = text.replace('(', '（').replace(')', '）')
+            break
+    
+    # 6. 建造年份
+    for elem in area_elems:
+        text = elem.get_text(strip=True)
+        if "年建造" in text:
+            year_match = re.search(r'(\d{4})', text)
+            if year_match:
+                info["建造年份"] = year_match.group(1)
+            break
+    
+    # 7. 总价
+    total_price = house_div.select_one(".property-price-total-num")
+    if total_price:
+        info["总价(万)"] = total_price.get_text(strip=True)
+    
+    # 8. 单价
+    unit_price = house_div.select_one(".property-price-average")
+    if unit_price:
+        unit_match = re.search(r'(\d+)', unit_price.get_text(strip=True))
+        if unit_match:
+            info["单价(元/㎡)"] = unit_match.group(1)
+    
+    # 9. 核心卖点
+    tags = house_div.select(".property-content-info-tag")
+    if tags:
+        info["核心卖点"] = "、".join([tag.get_text(strip=True) for tag in tags[:5]])
+    
+    return info
+
+def fetch_page_data(page_num):
+    """请求并解析页面（精准判定失败场景）"""
+    # 修正分页URL拼接逻辑
+    if page_num == 1:
+        url = f"{CONFIG['base_url']}/?PGTID=0d30000c-0009-fe09-52bb-9448ddefd4a4&ClickID=1"
+    else:
+        url = f"{CONFIG['base_url']}p{page_num}/?PGTID=0d30000c-0009-fe09-52bb-9448ddefd4a4&ClickID=1"
+    
+    # 模拟用户浏览行为（页面滚动）
+    simulate_user_behavior()
+    
+    for retry in range(CONFIG["max_retry"]):
+        try:
+            # 获取随机请求头
+            random_headers = get_random_headers()
+            cookies = dict([c.split('=', 1) for c in CONFIG["cookie"].split('; ') if c])
+            
+            response = requests.get(
+                url=url,
+                headers=random_headers,
+                cookies=cookies,
+                timeout=CONFIG["timeout"],
+                verify=False,
+                allow_redirects=True
+            )
+            # 第一步：判定请求是否成功（状态码200）
+            response.raise_for_status()
+            response.encoding = 'utf-8'
+            
+            # 第二步：判定页面是否为有效页面（不是反爬/验证页）
+            soup = BeautifulSoup(response.text, "html.parser")
+            # 检查页面是否包含58同城二手房核心标识（避免反爬页）
+            if not soup.select_one("title") or "58同城" not in soup.select_one("title").get_text():
+                print(f"⚠️ 第{page_num}页返回非58同城页面（可能反爬），重试中...")
+                time.sleep(random.uniform(CONFIG["min_interval"], CONFIG["max_interval"]))
+                continue
+            
+            # 第三步：模拟用户停留后解析数据
+            stay_delay = random.uniform(5, 10)
+            time.sleep(stay_delay)
+            
+            house_list = soup.select("div.property")
+            
+            # 情况1：有房源数据 → 正常返回
+            if house_list:
+                parsed_data = [extract_house_info(house) for house in house_list]
+                print(f"✅ 第{page_num}页解析成功：{len(parsed_data)}条房源")
+                return parsed_data, True  # 成功标志
+            # 情况2：无房源数据但页面有效 → 判定为有效空页，不重试
+            # else:
+            #    print(f"ℹ️ 第{page_num}页无房源数据（有效空页），跳过重试")
+            #   return [], True  # 成功标志（只是无数据）
+        
+        # 捕获请求异常（网络错误、超时、状态码错误）
+        except Exception as e:
+            error_msg = str(e)[:50]
+            print(f"❌ 第{page_num}页请求失败（{retry+1}/{CONFIG['max_retry']}）：{error_msg}")
+            if retry < CONFIG["max_retry"] - 1:
+                retry_delay = random.uniform(CONFIG["min_interval"] + 1, CONFIG["max_interval"] + 2)
+                time.sleep(retry_delay)
+    
+    # 所有重试都失败（请求异常/反爬页）→ 返回失败标志
+    print(f"❌ 第{page_num}页重试{CONFIG['max_retry']}次后仍失败（请求/反爬问题）")
+    return [], False
+
+def save_to_csv(house_data):
+    """写入CSV"""
+    try:
+        with open(CONFIG["csv_file"], "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            for data in house_data:
+                writer.writerow(list(data.values()))
+        return len(house_data)
+    except Exception as e:
+        print(f"❌ 写入CSV失败：{e}")
+        return 0
+
+# ===================== 主爬虫逻辑 =====================
+def main():
+    print("="*60)
+    print("🚀 武汉二手房爬虫（修正分页版）")
+    print("="*60)
+    
+    if not init_csv():
+        return
+    
+    total_crawled = 0
+    page_num = 1
+    failed_pages = []  # 记录失败页面
+    pbar = tqdm(total=CONFIG["max_pages"], desc="爬取进度（按页）")
+    
+    try:
+        while page_num <= CONFIG["max_pages"]:
+            print(f"\n📄 开始爬取第{page_num}页")
+            house_data, success = fetch_page_data(page_num)
+            
+            if success:
+                saved = save_to_csv(house_data)
+                total_crawled += saved
+                pbar.update(1)
+                page_num += 1  # 仅成功时递增页码
+            else:
+                failed_pages.append(page_num)
+                print(f"❌ 第{page_num}页重试{CONFIG['max_retry']}次后仍失败，跳过该页")
+                pbar.update(1)
+                page_num += 1  # 失败也递增页码，避免死循环
+            
+            # 分页访问间隔（随机）
+            page_interval = random.uniform(CONFIG["min_interval"], CONFIG["max_interval"])
+            print(f"⌛ 分页间隔{page_interval:.2f}秒...")
+            time.sleep(page_interval)
+    
+    except KeyboardInterrupt:
+        print("\n⚠️ 用户手动终止")
+    finally:
+        pbar.close()
+        print(f"\n📊 爬取完成：共获取{total_crawled}条房源数据")
+        print(f"📁 文件保存至：{CONFIG['csv_file']}")
+        if failed_pages:
+            print(f"⚠️ 失败页面：{failed_pages}")
+
+if __name__ == "__main__":
+    requests.packages.urllib3.disable_warnings()  # 忽略SSL警告
+    main() 
